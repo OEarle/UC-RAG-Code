@@ -1,0 +1,969 @@
+# %%
+###############################################################################
+# Cell 1 - Imports and Setup
+###############################################################################
+import pandas as pd
+import numpy as np
+import scipy.stats as stats
+import scipy  # Import main scipy module for version information
+import statsmodels.api as sm
+from datetime import datetime
+import statsmodels.formula.api as smf
+from scipy.stats import levene, ttest_ind, normaltest, kruskal, shapiro 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+import re
+
+# Seaborn style
+sns.set_style("whitegrid")
+sns.set_context("talk", font_scale=1.2)
+
+# Import matplotlib to print its version
+import matplotlib
+
+# Print version numbers for key libraries
+print("Pandas version:", pd.__version__)
+print("NumPy version:", np.__version__)
+print("SciPy version:", scipy.__version__)
+print("Statsmodels version:", sm.__version__)
+print("Matplotlib version:", matplotlib.__version__)
+print("Seaborn version:", sns.__version__)
+
+
+# %%
+###############################################################################
+# Cell 2 - DATA FILTERING 2
+###############################################################################
+def remove_nonessential_data(df):
+    try:
+        initial_count = len(df)
+        # Keep rows where fixation is 'Macular'
+        df = df[df['fixation'] == 'Macular']
+        removed_fixation = initial_count - len(df)
+        print(f"Removed {removed_fixation} scans due to non-Macular fixation.")
+        
+        # Remove nonessential columns.
+        columns_to_drop = ['dimensionZ', 'resolutionZ']
+        existing_drop_cols = [col for col in columns_to_drop if col in df.columns]
+        if existing_drop_cols:
+            df = df.drop(columns=existing_drop_cols)
+        
+        # Remove rows where pred_age is 'Poor quality'
+        before_pred = len(df)
+        df = df[df['pred_age'] != 'Poor quality']
+        removed_pred = before_pred - len(df)
+        print(f"Removed {removed_pred} scans due to 'Poor quality' pred_age.")
+        
+        return df
+    except FileNotFoundError:
+        print("Error: The file was not found. Please check the file path and try again.")
+    except pd.errors.EmptyDataError:
+        print("Error: The CSV file is empty. Please check the file contents.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+
+def calculate_age(df):
+    def calculate_age_from_dates(dob, scan_date):
+        dob = datetime.strptime(dob, '%Y-%m')
+        try:
+            scan_date = datetime.strptime(scan_date, '%Y-%m-%d')
+        except ValueError:
+            scan_date = datetime.strptime(scan_date, '%d/%m/%Y')
+        age = scan_date.year - dob.year - ((scan_date.month, scan_date.day) < (dob.month, 1))
+        return age
+
+    # Create the 'age_at_scan' column
+    df['age_at_scan'] = df.apply(lambda row: calculate_age_from_dates(row['dob_month'], row['date']), axis=1)
+    return df
+
+def restrict_by_age(df):
+    before_age = len(df)
+    # Restrict age between 40 and 75
+    df = df[(df['age_at_scan'] >= 40) & (df['age_at_scan'] <= 75)]
+    removed_age = before_age - len(df)
+    print(f"Removed {removed_age} scans due to age restriction (not between 40 and 75).")
+    return df
+
+def calculate_retinal_age_gap(df):
+    df['pred_age'] = pd.to_numeric(df['pred_age'], errors='coerce')
+    # Calculate the difference between age_at_scan and pred_age
+    df['retinal_age_gap'] = df['age_at_scan'] - df['pred_age']
+    return df
+
+def binary_condition_labels(df):
+    try:
+        # List of condition columns to process
+        condition_columns = ['CD', 'UC', 'other_IBD', 'htn', 'dm']
+        for col in condition_columns:
+            if col in df.columns:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    # Ensure that any nonzero value becomes 1 (and 0 remains 0)
+                    df[col] = df[col].apply(lambda x: 1 if x != 0 else 0)
+                else:
+                    df[col] = df[col].notna().astype(int)
+        return df 
+    except Exception as e:
+        print(f"An error has occurred in binary_condition_labels: {e}")
+        return df 
+
+def label_controls_and_UCpatients(df):
+    # Make a copy of the DataFrame to avoid modifying the original
+    df = df.copy()
+    # Label each scan: if the UC column equals 1 then label as 'UC_patient', otherwise label as 'Control'
+    df.loc[:, 'patient_label'] = np.where(df['UC'] == 1, 'UC_patient', 'Control')
+    # Print summaries of each count
+    total_scans = len(df)
+    n_UC = df[df['patient_label'] == 'UC_patient'].shape[0]
+    n_control = df[df['patient_label'] == 'Control'].shape[0]
+    print(f"Total scans: {total_scans}")
+    print(f"UC patients: {n_UC}")
+    print(f"Controls: {n_control}")
+    return df
+
+def take_instance_oct(df, instance_mode='first'):
+
+    before_dup = len(df)
+    
+    # Sort by patient_id, laterality, and date (ascending)
+    df = df.sort_values(by=['patient_id', 'laterality', 'date'])
+    # Drop duplicates while keeping either the first or the last occurrence
+    df = df.drop_duplicates(subset=['patient_id', 'laterality'], keep=instance_mode)
+    removed_dups = before_dup - len(df)
+    mode_text = "first" if instance_mode == 'first' else "last"
+    print(f"Removed {removed_dups} duplicate scans by taking the {mode_text} instance for each laterality.")
+    return df
+
+def save_file(df, output_file):
+    # Save the cleaned and filtered data to a new file
+    df.to_csv(output_file, index=False)
+
+# Input and Output Files 
+input_file = 'Raw_Data.csv' 
+output_file = 'Filtered_Data_2.csv' 
+
+try:
+    # Load data
+    df = pd.read_csv(input_file)
+    initial_total = len(df)
+    print(f"Initial total scans: {initial_total}")
+
+    # Apply data filtering steps
+    df = remove_nonessential_data(df)
+    df = calculate_age(df)
+    df = restrict_by_age(df)
+    
+    # Choose whether to keep first or last instance of scans per patient laterality
+    instance_mode = 'first'   # <----- CHANGE HERE
+    df = take_instance_oct(df, instance_mode=instance_mode)
+    
+    df = calculate_retinal_age_gap(df)
+    df = binary_condition_labels(df)
+    df = label_controls_and_UCpatients(df)
+
+    final_total = len(df)
+    print(f"Final total scans after filtering: {final_total}")
+
+    # Save the resulting file
+    save_file(df, output_file)
+    print(f"Filtered data saved to {output_file}")
+
+except Exception as e:
+    print(f"An error occurred: {e}")
+
+# %%
+###############################################################################
+# Cell 3 - Load Data
+###############################################################################
+df = pd.read_csv('S:/IoO_Keane_Research/People/Oscar/Dissertation Analysis/Filtered_Data_2.csv')
+
+# Stratify by Controls and UC
+df_controls = df[df['patient_label'] == 'Control']
+df_uc = df[df['patient_label'] == 'UC_patient']
+
+# %%
+###############################################################################
+# Cell 4 - Clean and Prepare Data
+###############################################################################
+# Filter for expected patient labels and create binary variable
+expected_labels = ['Control', 'UC_patient']
+if unexpected := set(df['patient_label'].unique()) - set(expected_labels):
+    print(f"Warning: Unexpected labels found: {unexpected}. Excluding them.")
+df = df[df['patient_label'].isin(expected_labels)].copy()
+df['UC_bin'] = (df['patient_label'] == 'UC_patient').astype(int)
+print("\nUC_bin Value Counts:\n", df['UC_bin'].value_counts())
+
+# Define covariates – update to use IMD quintiles instead of IMD deciles
+covariates = ['ethnicity_group', 'CD', 'other_IBD', 'htn', 'dm', 'age_at_scan', 'sex.x', 'imd_quintile']
+
+# Clean ethnicity_group and sex.x
+if 'ethnicity_group' in df.columns:
+    df['ethnicity_group'] = df['ethnicity_group'].replace(['', ' '], np.nan).fillna('Unknown')
+if 'sex.x' in df.columns:
+    df['sex.x'] = df['sex.x'].fillna('Unknown').astype('category')
+    # Remove rows with Unknown sex
+    unknown_count = df['sex.x'].value_counts().get('Unknown', 0)
+    print("Count of Unknown sex before removal:", unknown_count)
+    df = df[df['sex.x'] != 'Unknown']
+
+# Process imd_decile (for the decile distribution plot) and create imd_quintile for analysis
+if 'imd_decile' in df.columns:
+    df['imd_decile'] = pd.to_numeric(df['imd_decile'], errors='coerce')
+    print("IMD Decile unique numeric values:", sorted(df['imd_decile'].dropna().unique()))
+    df['imd_decile'] = df['imd_decile'].fillna("Missing").astype(str)
+    
+    # Create IMD Quintiles – convert the numeric version into 5 equally sized groups.
+    # We assume the numeric decile values range from 1 to 10.
+    df['imd_quintile'] = pd.qcut(
+        pd.to_numeric(df['imd_decile'], errors='coerce'),
+        q=5,
+        labels=["Q1", "Q2", "Q3", "Q4", "Q5"]
+    )
+    df['imd_quintile'] = df['imd_quintile'].astype('category')
+    df['imd_quintile'] = df['imd_quintile'].cat.as_ordered()
+
+# Replace inf values and drop rows with missing data in required columns
+required_columns = ['retinal_age_gap'] + [col for col in covariates if col != 'imd_decile']
+df_clean = df.replace([np.inf, -np.inf], np.nan).dropna(subset=required_columns)
+print(f"\nObservations after cleaning: {df_clean.shape[0]}")
+
+# %%
+###############################################################################
+# Cell 5 - Encode The Covariates
+###############################################################################
+# Update categorical variables list – use imd_quintile instead of imd_decile
+cat_vars = [c for c in ['ethnicity_group', 'CD', 'other_IBD', 'htn', 'dm', 'sex.x', 'imd_quintile'] if c in df_clean.columns]
+print(f"\nCategorical covariates to encode: {cat_vars}")
+
+# Dummy encoding
+df_encoded = pd.get_dummies(df_clean, columns=cat_vars, drop_first=True)
+
+# Drop unwanted columns
+drop_cols = ['patient_label', 'filename', 'imageId', 'dod', 'UC', 'dob_month', 'Unnamed: 0', 'patient_id']
+df_encoded.drop(columns=[col for col in drop_cols if col in df_encoded.columns],
+                inplace=True, errors='ignore')
+
+print("\nData after encoding (first 5 rows):")
+print(df_encoded.head())
+
+# Ensure retinal_age_gap is numeric and remove rows with missing values
+df_encoded['retinal_age_gap'] = pd.to_numeric(df_encoded['retinal_age_gap'], errors='coerce')
+df_encoded.dropna(subset=['retinal_age_gap'], inplace=True)
+
+print("\nData types after encoding:")
+print(df_encoded.dtypes)
+
+# Sanitize Column Names
+df_encoded.columns = [re.sub(r'\W+', '_', col) for col in df_encoded.columns]
+print("\nColumn names after sanitization:")
+print(df_encoded.columns.tolist())
+
+# Convert Boolean Columns to Integers
+bool_cols = df_encoded.select_dtypes(include=['bool']).columns
+if len(bool_cols) > 0:
+    df_encoded[bool_cols] = df_encoded[bool_cols].astype(int)
+    print("\nConverted boolean columns to integers:")
+    print(bool_cols.tolist())
+
+# %%
+# QUICK EDA #
+
+###############################################################################
+# Cell 6 - Histogram of RAG
+###############################################################################
+plt.figure(figsize=(8,5))
+sns.histplot(df_encoded['retinal_age_gap'], kde=True, bins=30, color='skyblue')
+plt.title("Distribution of Retinal Age Gap",
+    fontweight="bold",
+    fontsize=16,
+    pad=20
+)
+plt.xlabel("Retinal Age Gap", fontsize=14, fontweight="bold")
+plt.ylabel("Frequency", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 7 - Box Plot of RAG
+###############################################################################
+plt.figure(figsize=(6,5))
+sns.boxplot(
+    x='UC_bin',
+    y='retinal_age_gap',
+    data=df_encoded,
+    hue='UC_bin',
+    palette=['lightgreen','lightcoral']
+)
+plt.title("Retinal Age Gap by UC Status",
+    fontweight="bold",
+    fontsize=16,
+    pad=20
+)
+plt.xlabel("UC Status", fontsize=14, fontweight="bold")
+plt.ylabel("Retinal Age Gap", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.legend([],[], frameon=False)  # Hide the redundant legend
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 8 - IMD Decile Breakdown 
+###############################################################################
+# Restore original columns if they were removed during encoding
+if 'imd_decile' not in df_encoded.columns and 'imd_decile' in df_clean.columns:
+    df_encoded['imd_decile'] = df_clean['imd_decile']
+if 'ethnicity_group' not in df_encoded.columns and 'ethnicity_group' in df_clean.columns:
+    df_encoded['ethnicity_group'] = df_clean['ethnicity_group']
+
+plt.figure(figsize=(12,8))  # Bigger figure
+
+# Define IMD decile order: "1.0" through "10.0"
+order = [f"{i}.0" for i in range(1, 11)]
+
+# 1) Countplot of IMD Deciles (Left Axis)
+ax = sns.countplot(data=df_encoded, x='imd_decile', order=order, palette='viridis')
+ax.set_title("Distribution of IMD Deciles", fontweight="bold", fontsize=20, pad=20)
+ax.set_xlabel("IMD Decile", fontsize=14, fontweight="bold")
+ax.set_ylabel("Count", fontsize=14, fontweight="bold")
+ax.tick_params(axis='both', labelsize=12)
+
+# 2) Average Age per Decile on Twin Y-Axis (Right Axis)
+avg_age = df_encoded.groupby('imd_decile')['age_at_scan'].mean().reindex(order)
+ax2 = ax.twinx()
+ax2.plot(range(len(order)), avg_age, color='black', marker='o', linestyle='-', label='Avg Age')
+ax2.set_ylabel("Average Age", fontsize=14, fontweight="bold")
+ax2.tick_params(axis='y', labelsize=12)
+ax2.xaxis.set_visible(False)
+ax2.legend(loc='upper right', fontsize=9)
+for i, val in enumerate(avg_age):
+    if pd.notna(val):
+        ax2.annotate(f"{val:.2f}", xy=(i, val), xytext=(0, 5), textcoords='offset points',
+                     ha='center', color='black', fontsize=10)
+
+# 3) Ethnicity Percentages on a Third Axis (Offset Right)
+ethnicities = ["White", "Black Or Black British", "Asian Or Asian British", "Mixed", "Other Ethnic Groups", "Unknown"]
+# Create a third axis that shares the x-axis with ax and is offset to the right
+ax3 = ax.figure.add_axes(ax.get_position(), sharex=ax, frameon=False)
+ax3.yaxis.set_label_position("right")
+ax3.yaxis.set_ticks_position("right")
+ax3.spines['right'].set_position(('outward', 80))  # Offset 
+ax3.set_ylabel("Ethnicity % of Decile", fontsize=14, fontweight="bold")
+ax3.tick_params(axis='y', labelsize=12)
+ax3.xaxis.set_visible(False)
+colors = sns.color_palette("tab10", len(ethnicities))
+for idx, eth in enumerate(ethnicities):
+    # Calculate percentage for each decile for the current ethnicity
+    group_count = df_encoded[df_encoded['ethnicity_group'] == eth].groupby('imd_decile').size()
+    total_count = df_encoded.groupby('imd_decile').size()
+    fraction = (group_count / total_count * 100).reindex(order).fillna(0)
+    ax3.plot(range(len(order)), fraction, color=colors[idx], marker='s', linestyle='-', label=eth)
+    for i, val in enumerate(fraction):
+        ax3.annotate(f"{val:.1f}%", xy=(i, val), xytext=(0, 5), textcoords='offset points',
+                     ha='center', color=colors[idx], fontsize=9)
+ax3.legend(loc='center right', bbox_to_anchor=(1, 0.7), fontsize=9)
+
+plt.tight_layout()
+plt.show()
+
+
+# %%
+###############################################################################
+# Cell 9 - Pairplot - compares two continuous variables - "Retinal Age Gap" and "Age at Scan"
+# between two groups (UC patients and Controls) using a balanced sample
+###############################################################################
+base_vars = ['retinal_age_gap', 'age_at_scan']
+key_vars = base_vars.copy()
+
+print("\nSelected key variables for pairplot (only continuous):")
+for var in key_vars:
+    print(f"- {var}: {df_encoded[var].dtype}, unique={df_encoded[var].nunique()}")
+
+# Create a balanced sample: use all UC observations and sample an equal number of controls
+df_uc = df_encoded[df_encoded['UC_bin'] == 1]
+n_uc = len(df_uc)
+df_control = df_encoded[df_encoded['UC_bin'] == 0]
+print("\nUC observations:", n_uc)
+print("Control observations before sampling:", len(df_control))
+
+# Randomly sample control observations equal to the number of UC observations
+df_control_sample = df_control.sample(n=n_uc, random_state=42)
+print("Control observations after sampling:", len(df_control_sample))
+
+# Combine UC and sampled controls
+pairplot_sample = pd.concat([df_uc, df_control_sample])
+
+print(
+    "This graph shows a pairplot of Retinal Age Gap and Age at Scan, comparing UC patients (red, 'X') "
+    "to an equal number of Control participants (green, 'o'). The diagonal plots show KDE distributions, "
+    "while the off-diagonal plots show scatter plots."
+)
+
+print("\nCreating Pairplot with balanced sampled data...")
+pairplot_sample_renamed = pairplot_sample.rename(columns={
+    'retinal_age_gap': 'Retinal Age Gap',
+    'age_at_scan': 'Age at Scan',
+    'UC_bin': 'UC Status'
+})
+
+try:
+    pairplot_grid = sns.pairplot(
+        data=pairplot_sample_renamed,
+        vars=["Retinal Age Gap", "Age at Scan"],
+        hue="UC Status",
+        palette=["green", "red"],
+        markers=["o", "X"],
+        height=4,
+        aspect=1.2,
+        diag_kind="kde",
+        plot_kws=dict(alpha=0.9, s=70)
+    )
+    
+    pairplot_grid.fig.suptitle(
+        "Pairplot of Retinal Age Gap and Age at Scan by UC Status",
+        fontsize=22,    
+        fontweight="bold",
+        y=1.02  
+    )
+    pairplot_grid.fig.subplots_adjust(top=0.92, hspace=0.3)
+    for ax in pairplot_grid.axes.flatten():
+        ax.set_xlabel(ax.get_xlabel(), fontsize=14)
+        ax.set_ylabel(ax.get_ylabel(), fontsize=14)
+    for i in range(len(pairplot_grid.axes)):
+        for j in range(len(pairplot_grid.axes[i])):
+            if i != j:
+                ax = pairplot_grid.axes[i, j]
+                if ax.get_xlabel() == "Retinal Age Gap":
+                    ax.set_xlim(-40, 30)
+                elif ax.get_xlabel() == "Age at Scan":
+                    ax.set_xlim(35, 80)
+                if ax.get_ylabel() == "Retinal Age Gap":
+                    ax.set_ylim(-40, 30)
+                elif ax.get_ylabel() == "Age at Scan":
+                    ax.set_ylim(35, 80)
+    plt.show()
+except Exception as e:
+    print(f"Error creating pairplot: {e}")
+
+# %%
+###############################################################################
+# Cell 10 - Normality & Variance Tests
+###############################################################################
+print("\n=== D’Agostino’s K² Test for Normality ===")
+def perform_normality_test(data, label):
+    if len(data) < 8:
+        print(f"Normality ({label}): Not enough data.")
+        return None, None
+    stat, p = normaltest(data)
+    print(f"Normality ({label}): stat={stat:.3f}, p={p:.4f}")
+    if p < 0.05:
+        print(f"Data for {label} is NOT normally distributed")
+    else:
+        print(f"Data for {label} is normally distributed")
+    return stat, p
+
+ctrl_data = df_encoded.loc[df_encoded['UC_bin']==0, 'retinal_age_gap']
+uc_data   = df_encoded.loc[df_encoded['UC_bin']==1, 'retinal_age_gap']
+
+stat_ctrl, p_ctrl = perform_normality_test(ctrl_data, "Control")
+stat_uc, p_uc = perform_normality_test(uc_data, "UC")
+
+print("\n=== Levene’s Test for Homogeneity of Variances ===")
+lev_stat, lev_p = stats.levene(ctrl_data, uc_data)
+print(f"Levene’s Test: stat={lev_stat:.3f}, p={lev_p:.4f}")
+if lev_p < 0.05:
+    print("Controls and UC groups have DIFFERENT variances")
+else:
+    print("Controls and UC groups have SIMILAR variances")
+
+# %%
+###############################################################################
+# Cell 11 - Adjusted Linear Regression 
+###############################################################################
+print("\n===== Adjusted Multiple Linear Regression =====")
+
+# Define your original covariates list
+covariates = ['ethnicity_group', 'CD', 'other_IBD', 'htn', 'dm', 'age_at_scan', 'sex.x', 'imd_quintile']
+
+# Create a sanitized version of the covariates to match df_encoded column names
+# (e.g., "sex.x" becomes "sex_x")
+sanitized_covariates = [re.sub(r'\W+', '_', col) for col in covariates]
+
+# Construct predictor list using the sanitized covariate names
+predictors = ['UC_bin'] + [
+    c for c in df_encoded.columns 
+    if any(c.startswith(s) for s in sanitized_covariates) and c not in ['retinal_age_gap', 'UC_bin']
+]
+print("Predictors used in the adjusted model:", predictors)
+
+# Construct the regression formula: retinal_age_gap ~ predictors
+formula = "retinal_age_gap ~ " + " + ".join(predictors)
+print(f"Regression Formula: {formula}")
+
+# ---------------------------------------------------------------------------
+# 5A. Weighted Regression + Robust Standard Errors to Handle Group Imbalance
+group_sizes = df_encoded['UC_bin'].value_counts()
+weights = df_encoded['UC_bin'].map(group_sizes.sum() / (group_sizes * len(group_sizes)))
+
+model_weighted_robust = smf.ols(formula, data=df_encoded).fit(
+    weights=weights,
+    cov_type='HC3'
+)
+print("\nModel Summary (Weighted Regression + Robust SE):")
+print(model_weighted_robust.summary())
+
+if 'UC_bin' in model_weighted_robust.params:
+    coef_uc    = model_weighted_robust.params['UC_bin']
+    p_uc_bin   = model_weighted_robust.pvalues['UC_bin']
+    ci_low, ci_high = model_weighted_robust.conf_int().loc['UC_bin']
+else:
+    coef_uc = p_uc_bin = ci_low = ci_high = None
+
+print("\n=== Adjusted Regression Findings ===")
+print(f"The intercept is {model_weighted_robust.params['Intercept']:.2f}, representing the average retinal age gap for the control group.")
+print(f"The coefficient for UC_bin is {coef_uc:.3f}.")
+print(f"This implies that, holding other covariates constant, UC patients have on average a retinal age gap that is {coef_uc:+.3f} units different from Controls.")
+if p_uc_bin < 0.05:
+    print(f"The association is statistically significant (p = {p_uc_bin:.3f}).")
+else:
+    print(f"The association is not statistically significant (p = {p_uc_bin:.3f}).")
+print(f"The 95% confidence interval for the UC_bin coefficient ranges from {ci_low:.3f} to {ci_high:.3f}.")
+
+
+# %%
+###############################################################################
+# Cell 12 - Interaction Analysis
+###############################################################################
+interaction_formula = (
+    "retinal_age_gap ~ UC_bin * age_at_scan + " 
+    + " + ".join(var for var in predictors if var not in ["UC_bin", "age_at_scan"])
+)
+print("\n===== Interaction Analysis (UC_bin x age_at_scan) =====")
+print(f"Interaction Formula: {interaction_formula}")
+model_interaction = smf.ols(interaction_formula, data=df_encoded).fit(
+    weights=weights,
+    cov_type='HC3'
+)
+print("\nModel Summary (Interaction between UC_bin and age_at_scan):")
+print(model_interaction.summary())
+anova_results = sm.stats.anova_lm(model_weighted_robust, model_interaction)
+print("\nANOVA Comparison (Base Model vs. Interaction Model):")
+print(anova_results)
+if "UC_bin:age_at_scan" in model_interaction.params:
+    interaction_coef = model_interaction.params["UC_bin:age_at_scan"]
+    interaction_p = model_interaction.pvalues["UC_bin:age_at_scan"]
+    print(f"\nCoefficient for UC_bin:age_at_scan = {interaction_coef:.4f} (p = {interaction_p:.4g})")
+    if interaction_p < 0.05:
+        print("=> There is a significant interaction between UC status and age_at_scan.")
+    else:
+        print("=> No evidence of a significant interaction between UC status and age_at_scan.")
+
+# %%
+###############################################################################
+# Cell 13: Scatter Plot - Predicted vs. Actual Retinal Age Gap
+###############################################################################
+plt.figure(figsize=(8,6))
+sns.scatterplot(
+    x=model_weighted_robust.fittedvalues,
+    y=df_encoded['retinal_age_gap'],
+    alpha=0.5
+)
+plt.plot(
+    [df_encoded['retinal_age_gap'].min(), df_encoded['retinal_age_gap'].max()],
+    [df_encoded['retinal_age_gap'].min(), df_encoded['retinal_age_gap'].max()],
+    'r--'
+)
+plt.xlim(-18, 7)
+plt.ylim(-45, 50)
+plt.title("Predicted vs. Actual Retinal Age Gap (Weighted + Robust SE)", fontweight="bold", fontsize=16, pad=20)
+plt.xlabel("Predicted Retinal Age Gap", fontsize=14, fontweight="bold")
+plt.ylabel("Actual Retinal Age Gap", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 14: Residual Plot and Q-Q Plot
+###############################################################################
+# Residual Plot
+plt.figure(figsize=(8,6))
+sns.residplot(
+    x=model_weighted_robust.fittedvalues,
+    y=model_weighted_robust.resid,
+    lowess=True,
+    color='purple',
+    scatter_kws={'alpha': 0.5}
+)
+plt.xlim(-18, 7)
+plt.ylim(-45, 60)
+plt.title("Residuals vs. Fitted Values (Weighted + Robust SE)", fontweight="bold", fontsize=16, pad=20)
+plt.xlabel("Fitted Values", fontsize=14, fontweight="bold")
+plt.ylabel("Residuals", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 15 - Q-Q Plot: Assessing Residual Normality 
+###############################################################################
+plt.figure(figsize=(8,6))
+sm.qqplot(model_weighted_robust.resid_pearson, line='45', fit=True)
+plt.title(
+    "Q-Q Plot of Residuals (Weighted + Robust SE)",
+    fontweight="bold",
+    fontsize=16,
+    pad=20
+)
+plt.xlabel("Theoretical Quantiles", fontsize=10)
+plt.ylabel("Sample Quantiles", fontsize=10)
+plt.xticks(fontsize=10)  # Smaller x-axis tick labels
+plt.yticks(fontsize=10)  # Smaller y-axis tick labels
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 16: Histogram Plot - Distribution of Residuals
+###############################################################################
+plt.figure(figsize=(8,6))
+sns.histplot(model_weighted_robust.resid, kde=True, bins=30, color='orange')
+plt.title("Histogram of Residuals (Weighted + Robust SE)", fontweight="bold", fontsize=16, pad=20)
+plt.xlabel("Residuals", fontsize=14, fontweight="bold")
+plt.ylabel("Frequency", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 17 - Residuals' Normality
+###############################################################################
+print("\n=== D’Agostino’s K² Test for Residuals ===")
+residuals = model_weighted_robust.resid
+stat_resid, p_resid = perform_normality_test(residuals, "Residuals")
+
+# %%
+###############################################################################
+# Cell 18 - VIF Calculation
+###############################################################################
+print("\n=== Variance Inflation Factor (VIF) ===")
+X = df_encoded[predictors].copy()
+for col in X.columns:
+    if X[col].dtype == bool:
+        X[col] = X[col].astype(int)
+X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+X = sm.add_constant(X)
+vif_df = pd.DataFrame()
+vif_df["Variable"] = X.columns
+vif_df["VIF"] = [variance_inflation_factor(X.values, i) for i in range(X.shape[1])]
+print(vif_df)
+
+# %%
+###############################################################################
+# Cell 19 - Final Summary
+###############################################################################
+print("\n=== Final Summary ===")
+n_obs = df_encoded.shape[0]
+print(f"Observations used for analysis: {n_obs}")
+print(f"Covariates included: {covariates}")
+print("\n=== Normality Tests ===")
+print(f"Control Group p-value: {p_ctrl:.4f} (p<0.05 => not normal)")
+print(f"UC Group p-value: {p_uc:.4f} (p<0.05 => not normal)")
+print(f"Residuals p-value: {p_resid:.4f} (p<0.05 => not normal)")
+print("\n=== Levene’s Test ===")
+print(f"Homogeneity of Variances p-value: {lev_p:.4f}")
+if lev_p > 0.05:
+    print(" => Variances are equal across groups.")
+else:
+    print(" => Variances differ across groups.")
+print("\n=== Regression Coefficient for UC_bin (Weighted + Robust SE) ===")
+if coef_uc is not None:
+    print(f"Coefficient: {coef_uc:.3f}")
+    print(f"P-value: {p_uc_bin:.4f}")
+    print(f"95% Confidence Interval: ({ci_low:.3f}, {ci_high:.3f})")
+    if p_uc_bin < 0.05:
+        direction = "higher" if coef_uc > 0 else "lower"
+        print(f" => UC patients have a {abs(coef_uc):.3f}-unit {direction} retinal age gap compared to Controls (adjusted).")
+    else:
+        print(" => No statistically significant difference in retinal age gap between UC patients and Controls.")
+else:
+    print("UC_bin coefficient is not available.")
+try:
+    vif_df
+except NameError:
+    from statsmodels.stats.outliers_influence import variance_inflation_factor
+    X_exog = model_weighted_robust.model.exog
+    variables = model_weighted_robust.model.exog_names
+    vif_values = [variance_inflation_factor(X_exog, i) for i in range(X_exog.shape[1])]
+    vif_df = pd.DataFrame({'Variable': variables, 'VIF': vif_values})
+print("\n=== VIF (Multicollinearity Check) ===")
+print(vif_df)
+if 'const' in vif_df['Variable'].values:
+    const_vif = vif_df.loc[vif_df['Variable']=='const','VIF'].values[0]
+    if const_vif > 10:
+        print(f"\nWarning: The intercept (const) VIF is {const_vif:.2f}, which can indicate scaling or multicollinearity issues.")
+else:
+    const_vif = None
+high_vif = vif_df[(vif_df['VIF'] > 5) & (vif_df['Variable'] != 'const')]
+if not high_vif.empty:
+    print("\nHigh multicollinearity detected in these variables:")
+    print(high_vif)
+else:
+    print("\nNo major multicollinearity issues detected (VIF < 5).")
+print("\n=== Relationship Summary ===")
+if coef_uc is not None:
+    if p_uc_bin < 0.05:
+        direction = "higher" if coef_uc > 0 else "lower"
+        print(f"After adjusting for covariates and applying weighted regression with robust SE, UC patients have a statistically significant {abs(coef_uc):.3f}-unit {direction} retinal age gap compared to Controls (p = {p_uc_bin:.4f}).")
+    else:
+        print("After adjusting for covariates and applying weighted regression with robust SE, there is no statistically significant difference in retinal age gap between UC patients and Controls.")
+else:
+    print("The regression analysis did not include the UC_bin variable.")
+print("\nDone.")
+
+# %%
+# SUBGROUP ANALYSIS
+
+###############################################################################
+# Cell 20A - Subgroup Regression Analysis
+###############################################################################
+results = []
+# Use IMD quintiles for subgroup analysis instead of deciles.
+for var in ['ethnicity_group', 'sex.x', 'imd_quintile']:
+    if var not in df_clean.columns:
+        print(f"Warning: {var} not found in df_clean. Skipping.")
+        continue
+    levels = sorted(df_clean[var].dropna().unique())
+    subgroup_prefix = var.replace(".", "_")
+    for level in levels:
+        print(f"\n--- Adjusted Analysis for {var} = {level} ---")
+        subset_clean = df_clean[df_clean[var] == level].copy()
+        if 'UC_bin' not in subset_clean.columns or len(subset_clean['UC_bin'].unique()) < 2:
+            print("Not enough variation in UC status. Skipping.")
+            continue
+        predictors_sub = [p for p in predictors if not p.startswith(subgroup_prefix)]
+        if not predictors_sub:
+            print(f"No predictors left after removing {var}. Skipping.")
+            continue
+        formula_sub = "retinal_age_gap ~ " + " + ".join(predictors_sub)
+        subset_encoded = df_encoded.loc[subset_clean.index].copy()
+        if subset_encoded.shape[0] < 10:
+            print("Subgroup too small. Skipping.")
+            continue
+        group_sizes_sub = subset_encoded['UC_bin'].value_counts()
+        if len(group_sizes_sub) < 2:
+            print("Not enough UC variation in encoded subgroup. Skipping.")
+            continue
+        weights_sub = subset_encoded['UC_bin'].map(
+            group_sizes_sub.sum() / (group_sizes_sub * len(group_sizes_sub))
+        )
+        try:
+            model_sub = smf.ols(formula_sub, data=subset_encoded).fit(
+                weights=weights_sub, cov_type='HC3'
+            )
+            coef = model_sub.params['UC_bin']
+            conf_int = model_sub.conf_int().loc['UC_bin']
+            pval = model_sub.pvalues['UC_bin']
+            print("Subgroup Regression Coefficient for UC_bin:")
+            print(model_sub.summary().tables[1])
+            results.append({
+                'demographic': var,
+                'level': level,
+                'coef': coef,
+                'ci_lower': conf_int[0],
+                'ci_upper': conf_int[1],
+                'pval': pval,
+                'n': subset_encoded.shape[0]
+            })
+        except Exception as e:
+            print(f"Error for {var} = {level}: {e}")
+
+###############################################################################
+# Cell 20B - Forest Plot with Colorblind-Friendly Palette
+###############################################################################
+if results:
+    df_results = pd.DataFrame(results)
+    def final_order(row):
+        demo, level = row['demographic'], str(row['level']).strip()
+        if demo == 'sex.x':
+            mapping = {"Male": 1, "Female": 2, "Unknown": 3}
+            return mapping.get(level.capitalize(), 99)
+        elif demo == 'imd_quintile':
+            try:
+                # Assuming quintile labels are "Q1", "Q2", ... in correct order.
+                order_map = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "Q5": 5}
+                return order_map.get(level, 99)
+            except:
+                return 99
+        elif demo == 'ethnicity_group':
+            mapping = {
+                "White": 1,
+                "Black Or Black British": 2,
+                "Asian Or Asian British": 3,
+                "Mixed": 4,
+                "Other Ethnic Groups": 5,
+                "Unknown": 999
+            }
+            eth_val = mapping.get(level.title(), 6)
+            return 10 + eth_val
+        else:
+            return 9999
+
+    def assign_color(row):
+        demo, level = row['demographic'], str(row['level']).strip().title()
+        if demo == 'sex.x':
+            return "#0072B2" if level == "Male" else "#CC79A7" if level == "Female" else "#999999"
+        elif demo == 'imd_quintile':
+            return "#009E73"
+        elif demo == 'ethnicity_group':
+            if level == "White": return "#56B4E9"
+            elif level == "Black Or Black British": return "#D55E00"
+            elif level == "Asian Or Asian British": return "#E69F00"
+            elif level == "Mixed": return "#F0E442"
+            elif level == "Other Ethnic Groups": return "#009E73"
+            elif level == "Unknown": return "#000000"
+            else: return "#999999"
+        else:
+            return "#000000"
+
+    def assign_label(row):
+        demo, level = row['demographic'], str(row['level']).strip()
+        if demo == 'imd_quintile':
+            return f"IMD Quintile: {level}"
+        elif demo == 'sex.x':
+            return level.capitalize()
+        elif demo == 'ethnicity_group':
+            return level.title()
+        else:
+            return level
+
+    df_results['final_order'] = df_results.apply(final_order, axis=1)
+    df_results['color'] = df_results.apply(assign_color, axis=1)
+    df_results['Group'] = df_results.apply(assign_label, axis=1)
+    df_results.sort_values("final_order", inplace=True)
+    
+    n = len(df_results)
+    y_positions = list(range(n))
+    
+    plt.figure(figsize=(12, 7))
+    for i, (_, row) in enumerate(df_results.iterrows()):
+        plt.errorbar(
+            row['coef'], y_positions[i],
+            xerr=[[row['coef'] - row['ci_lower']], [row['ci_upper'] - row['coef']]], 
+            fmt='o', color=row['color'], ecolor='gray',
+            capsize=4, elinewidth=2, markersize=8
+        )
+    plt.axvline(0, color='black', linestyle='--', linewidth=1)
+    plt.yticks(y_positions, df_results['Group'], fontsize=12)
+    plt.xlabel("Regression Coefficient for UC Status:1", fontsize=13, fontweight="bold")
+    plt.ylabel("")
+    plt.title("Forest Plot of Adjusted Regression Coefficients for UC Status:1",
+              fontsize=18, fontweight="bold", pad=20)
+    plt.grid(axis='x', linestyle=':', alpha=0.7)
+    plt.tight_layout()
+    plt.gca().invert_yaxis()
+    plt.show()
+else:
+    print("No subgroup regression results available for plotting.")
+
+# %%
+###############################################################################
+# New Cell – Enhanced Separate Box Plots Using IMD Quintiles (Updated)
+###############################################################################
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# --- Step 1: (Already done in Cell 4) df_clean now contains 'imd_quintile'
+print("IMD Quintile unique values:", df_clean['imd_quintile'].unique())
+
+# --- Step 2: Define Formatting Settings ---
+# Palette: forestgreen for Controls (0) and gold for UC (1)
+palette = {0: 'forestgreen', 1: 'gold'}  
+axis_label_size = 12
+tick_label_size = 10
+title_size = 16
+legend_text_size = 10
+
+# --- Step 3: Box Plot for Ethnicity ---
+plt.figure(figsize=(10, 6))
+ax1 = sns.boxplot(
+    data=df_clean,
+    x='ethnicity_group',
+    y='retinal_age_gap',
+    hue='UC_bin',
+    palette=palette
+)
+ax1.set_title("RAG by Ethnicity and UC Status", fontweight="bold", fontsize=title_size)
+ax1.set_xlabel("Ethnicity", fontsize=axis_label_size)
+ax1.set_ylabel("Retinal Age Gap (years)", fontsize=axis_label_size)
+ax1.set_xticklabels(ax1.get_xticklabels(), rotation=45, ha='right', fontsize=tick_label_size)
+ax1.tick_params(axis='y', labelsize=tick_label_size)
+leg1 = ax1.legend(title='UC Status', bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, prop={'size': legend_text_size})
+plt.tight_layout()
+plt.show()
+
+# --- Step 4: Box Plot for Sex (displaying only Male and Female) ---
+# 1. Make a copy so we don’t alter df_clean globally
+df_sex_filtered = df_clean.copy()
+
+# 2. Keep only rows with sex.x == “Male” or “Female”
+df_sex_filtered = df_sex_filtered[df_sex_filtered['sex.x'].isin(['Male', 'Female'])]
+
+# 3. If sex.x is categorical, remove “Unknown” from the categories
+#    (this step is crucial if “Unknown” is still a listed category)
+if pd.api.types.is_categorical_dtype(df_sex_filtered['sex.x']):
+    df_sex_filtered['sex.x'] = df_sex_filtered['sex.x'].cat.remove_unused_categories()
+
+# 4. Now plot using only df_sex_filtered
+plt.figure(figsize=(8, 6))
+ax = sns.boxplot(
+    data=df_sex_filtered,
+    x='sex.x',
+    y='retinal_age_gap',
+    hue='UC_bin',
+    palette={0: 'forestgreen', 1: 'gold'},
+    # Force the order if needed:
+    order=['Male', 'Female']  # “Male” then “Female”
+)
+
+ax.set_title("RAG by Sex and UC Status", fontweight="bold", fontsize=16)
+ax.set_xlabel("Sex", fontsize=12)
+ax.set_ylabel("Retinal Age Gap (years)", fontsize=12)
+ax.set_xticklabels(ax.get_xticklabels(), fontsize=10)
+ax.tick_params(axis='y', labelsize=10)
+
+# Adjust legend
+ax.legend(title='UC Status', bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, prop={'size': 10})
+
+plt.tight_layout()
+plt.show()
+
+# --- Step 5: Box Plot for IMD Quintiles ---
+plt.figure(figsize=(8, 6))
+ax3 = sns.boxplot(
+    data=df_clean,
+    x='imd_quintile',
+    y='retinal_age_gap',
+    hue='UC_bin',
+    palette=palette
+)
+ax3.set_title("RAG by IMD Quintile and UC Status", fontweight="bold", fontsize=title_size)
+ax3.set_xlabel("IMD Quintile", fontsize=axis_label_size)
+ax3.set_ylabel("Retinal Age Gap (years)", fontsize=axis_label_size)
+ax3.set_xticklabels(ax3.get_xticklabels(), fontsize=tick_label_size)
+ax3.tick_params(axis='y', labelsize=tick_label_size)
+leg3 = ax3.legend(title='UC Status', bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, prop={'size': legend_text_size})
+plt.tight_layout()
+plt.show()
+
+
+
