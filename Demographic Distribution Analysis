@@ -1,0 +1,449 @@
+# %%
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tabulate import tabulate
+from scipy.stats import ttest_ind, chi2_contingency, fisher_exact
+
+# --- Load Unadjusted Data ---
+unadjusted_path = "S:/IoO_Keane_Research/People/Oscar/Dissertation Analysis/Filtered_Data_1.csv"
+df_unadj = pd.read_csv(unadjusted_path)
+
+print("Columns in unadjusted data:")
+print(df_unadj.columns)
+
+# --- Create UC_bin Column if Missing ---
+if 'UC_bin' not in df_unadj.columns:
+    if 'patient_label' in df_unadj.columns:
+        df_unadj['UC_bin'] = (df_unadj['patient_label'] == 'UC_patient').astype(int)
+    else:
+        raise KeyError("Neither 'UC_bin' nor 'patient_label' found in the unadjusted dataset.")
+
+# --- Helper Functions for Summary ---
+
+def compute_mean_sd(df, col):
+    mean_val = df[col].mean()
+    std_val = df[col].std()
+    return f"{mean_val:.2f} ± {std_val:.2f}"
+
+def count_percent(df, condition):
+    count = condition.sum()
+    pct = 100.0 * count / len(df) if len(df) > 0 else 0
+    return count, pct
+
+def get_group_counts(df, col, group_labels):
+    results = {}
+    total = len(df)
+    for lbl in group_labels:
+        c = (df[col] == lbl).sum()
+        pct = 100.0 * c / total if total else 0
+        results[lbl] = (c, pct)
+    return results
+
+# Statistical test for continuous variables (Age)
+def test_continuous(df, col):
+    group_uc = df[df['UC_bin'] == 1][col].dropna()
+    group_ctrl = df[df['UC_bin'] == 0][col].dropna()
+    stat, p = ttest_ind(group_uc, group_ctrl, equal_var=False)
+    return p
+
+# Statistical test for categorical variables using chi-square
+def test_categorical(df, col, categories):
+    uc_counts = df[df['UC_bin'] == 1][col].value_counts().reindex(categories, fill_value=0)
+    ctrl_counts = df[df['UC_bin'] == 0][col].value_counts().reindex(categories, fill_value=0)
+    table = pd.DataFrame({"UC": uc_counts, "Control": ctrl_counts})
+    chi2, p, dof, expected = chi2_contingency(table)
+    return p
+
+# Statistical test for binary variables using chi-square or Fisher's exact if any cell is 0
+def test_binary(df, col):
+    uc_yes = (df[df['UC_bin'] == 1][col] == 1).sum()
+    uc_no = (df[df['UC_bin'] == 1][col] == 0).sum()
+    ctrl_yes = (df[df['UC_bin'] == 0][col] == 1).sum()
+    ctrl_no = (df[df['UC_bin'] == 0][col] == 0).sum()
+    table = np.array([[uc_yes, uc_no],
+                      [ctrl_yes, ctrl_no]])
+    # Use Fisher's exact test if any cell is zero
+    if (table == 0).any():
+        _, p = fisher_exact(table)
+        return p
+    else:
+        chi2, p, dof, expected = chi2_contingency(table)
+        return p
+
+def summarize_dataset(df, dataset_label="Dataset"):
+    # Split into UC and Control groups
+    df_uc = df[df['UC_bin'] == 1]
+    df_ctrl = df[df['UC_bin'] == 0]
+    n_uc = len(df_uc)
+    n_ctrl = len(df_ctrl)
+    
+    # Age summary
+    age_uc = compute_mean_sd(df_uc, 'age_at_scan')
+    age_ctrl = compute_mean_sd(df_ctrl, 'age_at_scan')
+    p_age = test_continuous(df, 'age_at_scan')
+    
+    # Sex distribution
+    sex_labels = ['Male', 'Female', 'Unknown']
+    sex_uc = get_group_counts(df_uc, 'sex.x', sex_labels)
+    sex_ctrl = get_group_counts(df_ctrl, 'sex.x', sex_labels)
+    p_sex = test_categorical(df, 'sex.x', sex_labels)
+    
+    # Ethnicity distribution
+    eth_labels = ['Asian or Asian British', 'Black or Black British', 'Mixed',
+                  'Other Ethnic Groups', 'White', 'Unknown']
+    eth_uc = get_group_counts(df_uc, 'ethnicity_group', eth_labels)
+    eth_ctrl = get_group_counts(df_ctrl, 'ethnicity_group', eth_labels)
+    p_eth = test_categorical(df, 'ethnicity_group', eth_labels)
+    
+    # Binary conditions: other_IBD, CD, htn, dm
+    p_other_ibd = test_binary(df, 'other_IBD')
+    p_cd = test_binary(df, 'CD')
+    p_htn = test_binary(df, 'htn')
+    p_dm = test_binary(df, 'dm')
+    
+    def label_count(df, col):
+        c, pct = count_percent(df, df[col] == 1)
+        return f"{c} ({pct:.1f}%)"
+    
+    other_ibd_uc = label_count(df_uc, 'other_IBD')
+    other_ibd_ctrl = label_count(df_ctrl, 'other_IBD')
+    cd_uc = label_count(df_uc, 'CD')
+    cd_ctrl = label_count(df_ctrl, 'CD')
+    htn_uc = label_count(df_uc, 'htn')
+    htn_ctrl = label_count(df_ctrl, 'htn')
+    dm_uc = label_count(df_uc, 'dm')
+    dm_ctrl = label_count(df_ctrl, 'dm')
+    
+    summary = {
+        "Dataset": dataset_label,
+        "N_UC": n_uc,
+        "N_Control": n_ctrl,
+        "Age_UC": age_uc,
+        "Age_Control": age_ctrl,
+        "p_Age": p_age,
+        "Sex_UC": sex_uc,
+        "Sex_Control": sex_ctrl,
+        "p_Sex": p_sex,
+        "Ethnicity_UC": eth_uc,
+        "Ethnicity_Control": eth_ctrl,
+        "p_Ethnicity": p_eth,
+        "Other_IBD_UC": other_ibd_uc,
+        "Other_IBD_Control": other_ibd_ctrl,
+        "p_Other_IBD": p_other_ibd,
+        "Crohns_UC": cd_uc,
+        "Crohns_Control": cd_ctrl,
+        "p_Crohns": p_cd,
+        "HTN_UC": htn_uc,
+        "HTN_Control": htn_ctrl,
+        "p_HTN": p_htn,
+        "DM_UC": dm_uc,
+        "DM_Control": dm_ctrl,
+        "p_DM": p_dm
+    }
+    return summary
+
+def print_summary_table_detailed(summary):
+    # Build detailed table rows with separate rows for each category
+    rows = []
+    rows.append(["Age, y", "Overall", summary["Age_UC"], summary["Age_Control"], f"p = {summary['p_Age']:.4f}"])
+    
+    # Sex: separate rows for each category
+    for cat in ['Male', 'Female', 'Unknown']:
+        uc_val = f"{summary['Sex_UC'][cat][0]} ({summary['Sex_UC'][cat][1]:.1f}%)"
+        ctrl_val = f"{summary['Sex_Control'][cat][0]} ({summary['Sex_Control'][cat][1]:.1f}%)"
+        rows.append(["Sex, n (%)", cat, uc_val, ctrl_val, f"p = {summary['p_Sex']:.4f}"])
+    
+    # Ethnicity: separate rows for each category
+    for cat in ['Asian or Asian British', 'Black or Black British', 'Mixed', 'Other Ethnic Groups', 'White', 'Unknown']:
+        uc_val = f"{summary['Ethnicity_UC'][cat][0]} ({summary['Ethnicity_UC'][cat][1]:.1f}%)"
+        ctrl_val = f"{summary['Ethnicity_Control'][cat][0]} ({summary['Ethnicity_Control'][cat][1]:.1f}%)"
+        rows.append(["Ethnicity, n (%)", cat, uc_val, ctrl_val, f"p = {summary['p_Ethnicity']:.4f}"])
+    
+    # Binary conditions
+    rows.append(["Other IBD, n (%)", "Overall", summary["Other_IBD_UC"], summary["Other_IBD_Control"], f"p = {summary['p_Other_IBD']:.4f}"])
+    rows.append(["Crohns Disease, n (%)", "Overall", summary["Crohns_UC"], summary["Crohns_Control"], f"p = {summary['p_Crohns']:.4f}"])
+    rows.append(["Hypertension, n (%)", "Overall", summary["HTN_UC"], summary["HTN_Control"], f"p = {summary['p_HTN']:.4f}"])
+    rows.append(["Diabetes Mellitus, n (%)", "Overall", summary["DM_UC"], summary["DM_Control"], f"p = {summary['p_DM']:.4f}"])
+    
+    headers = ["Characteristic", "Category", 
+               f"UC (n = {summary['N_UC']})", f"Control (n = {summary['N_Control']})",
+               "p-value"]
+    
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+# --- Summarize and Print Table for Unadjusted Data ---
+summary_unadj = summarize_dataset(df_unadj, dataset_label="Unadjusted Analysis")
+print_summary_table_detailed(summary_unadj)
+
+
+# %%
+# Define the fixed order of ethnicity categories
+eth_labels = [
+    'Asian or Asian British',
+    'Black or Black British',
+    'Mixed',
+    'Other Ethnic Groups',
+    'White',
+    'Unknown'
+]
+
+# Split the unadjusted data into UC and Control groups
+df_uc_unadj = df_unadj[df_unadj['UC_bin'] == 1]
+df_control_unadj = df_unadj[df_unadj['UC_bin'] == 0]
+
+# Get ethnicity counts and reindex to ensure the same order; fill missing with 0
+uc_eth_counts_unadj = df_uc_unadj['ethnicity_group'].value_counts().reindex(eth_labels, fill_value=0)
+control_eth_counts_unadj = df_control_unadj['ethnicity_group'].value_counts().reindex(eth_labels, fill_value=0)
+
+# Convert counts to percentages
+uc_eth_percent_unadj = 100 * uc_eth_counts_unadj / len(df_uc_unadj)
+control_eth_percent_unadj = 100 * control_eth_counts_unadj / len(df_control_unadj)
+
+# Create a DataFrame for plotting
+eth_df_unadj = pd.DataFrame({
+    "Ethnicity": eth_labels,
+    "UC": uc_eth_percent_unadj.values,
+    "Control": control_eth_percent_unadj.values
+})
+
+# Set positions for the grouped bars
+x = np.arange(len(eth_labels))
+width = 0.35  # width of each bar
+
+# Plot grouped bar chart
+plt.figure(figsize=(8,6))
+plt.bar(x - width/2, eth_df_unadj["UC"], width, label="UC", color="red", alpha=0.7)
+plt.bar(x + width/2, eth_df_unadj["Control"], width, label="Control", color="green", alpha=0.7)
+plt.xlabel("Ethnicity", fontsize=14, fontweight="bold")
+plt.ylabel("Percentage (%)", fontsize=14, fontweight="bold")
+plt.title("Ethnicity Distribution: Unadjusted Analysis", fontsize=16, fontweight="bold", pad=20)
+plt.xticks(x, eth_labels, rotation=45, fontsize=12)
+plt.yticks(fontsize=12)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+# %%
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tabulate import tabulate
+from scipy.stats import ttest_ind, chi2_contingency
+
+# --- Load Adjusted Data ---
+adjusted_path = "S:/IoO_Keane_Research/People/Oscar/Dissertation Analysis/Filtered_Data_2.csv"
+df_adj = pd.read_csv(adjusted_path)
+
+print("Columns in adjusted data:")
+print(df_adj.columns)
+
+# --- Create UC_bin Column if Missing ---
+if 'UC_bin' not in df_adj.columns:
+    if 'patient_label' in df_adj.columns:
+        df_adj['UC_bin'] = (df_adj['patient_label'] == 'UC_patient').astype(int)
+    else:
+        raise KeyError("Neither 'UC_bin' nor 'patient_label' found in the adjusted dataset.")
+
+# --- Helper Functions for Summary ---
+
+def compute_mean_sd(df, col):
+    mean_val = df[col].mean()
+    std_val = df[col].std()
+    return f"{mean_val:.2f} ± {std_val:.2f}"
+
+def count_percent(df, condition):
+    count = condition.sum()
+    pct = 100.0 * count / len(df) if len(df) > 0 else 0
+    return count, pct
+
+def get_group_counts(df, col, group_labels):
+    results = {}
+    total = len(df)
+    for lbl in group_labels:
+        c = (df[col] == lbl).sum()
+        pct = 100.0 * c / total if total else 0
+        results[lbl] = (c, pct)
+    return results
+
+# Statistical test for continuous variable (Age)
+def test_continuous(df, col):
+    group_uc = df[df['UC_bin'] == 1][col].dropna()
+    group_ctrl = df[df['UC_bin'] == 0][col].dropna()
+    stat, p = ttest_ind(group_uc, group_ctrl, equal_var=False)
+    return p
+
+# Statistical test for categorical variable using chi-square
+def test_categorical(df, col, categories):
+    uc_counts = df[df['UC_bin'] == 1][col].value_counts().reindex(categories, fill_value=0)
+    ctrl_counts = df[df['UC_bin'] == 0][col].value_counts().reindex(categories, fill_value=0)
+    table = pd.DataFrame({"UC": uc_counts, "Control": ctrl_counts})
+    chi2, p, dof, expected = chi2_contingency(table)
+    return p
+
+# Statistical test for binary variables using chi-square
+def test_binary(df, col):
+    uc_yes = (df[df['UC_bin'] == 1][col] == 1).sum()
+    uc_no = (df[df['UC_bin'] == 1][col] == 0).sum()
+    ctrl_yes = (df[df['UC_bin'] == 0][col] == 1).sum()
+    ctrl_no = (df[df['UC_bin'] == 0][col] == 0).sum()
+    table = np.array([[uc_yes, uc_no],
+                      [ctrl_yes, ctrl_no]])
+    chi2, p, dof, expected = chi2_contingency(table)
+    return p
+
+def summarize_dataset(df, dataset_label="Dataset"):
+    # Split into UC and Control groups
+    df_uc = df[df['UC_bin'] == 1]
+    df_ctrl = df[df['UC_bin'] == 0]
+    n_uc = len(df_uc)
+    n_ctrl = len(df_ctrl)
+    
+    # Age summary
+    age_uc = compute_mean_sd(df_uc, 'age_at_scan')
+    age_ctrl = compute_mean_sd(df_ctrl, 'age_at_scan')
+    p_age = test_continuous(df, 'age_at_scan')
+    
+    # Sex distribution
+    sex_labels = ['Male', 'Female', 'Unknown']
+    sex_uc = get_group_counts(df_uc, 'sex.x', sex_labels)
+    sex_ctrl = get_group_counts(df_ctrl, 'sex.x', sex_labels)
+    p_sex = test_categorical(df, 'sex.x', sex_labels)
+    
+    # Ethnicity distribution
+    eth_labels = ['Asian or Asian British', 'Black or Black British', 'Mixed',
+                  'Other Ethnic Groups', 'White', 'Unknown']
+    eth_uc = get_group_counts(df_uc, 'ethnicity_group', eth_labels)
+    eth_ctrl = get_group_counts(df_ctrl, 'ethnicity_group', eth_labels)
+    p_eth = test_categorical(df, 'ethnicity_group', eth_labels)
+    
+    # Binary conditions: other_IBD, CD, htn, dm
+    p_other_ibd = test_binary(df, 'other_IBD')
+    p_cd = test_binary(df, 'CD')
+    p_htn = test_binary(df, 'htn')
+    p_dm = test_binary(df, 'dm')
+    
+    def label_count(df, col):
+        c, pct = count_percent(df, df[col] == 1)
+        return f"{c} ({pct:.1f}%)"
+    
+    other_ibd_uc = label_count(df_uc, 'other_IBD')
+    other_ibd_ctrl = label_count(df_ctrl, 'other_IBD')
+    cd_uc = label_count(df_uc, 'CD')
+    cd_ctrl = label_count(df_ctrl, 'CD')
+    htn_uc = label_count(df_uc, 'htn')
+    htn_ctrl = label_count(df_ctrl, 'htn')
+    dm_uc = label_count(df_uc, 'dm')
+    dm_ctrl = label_count(df_ctrl, 'dm')
+    
+    summary = {
+        "Dataset": dataset_label,
+        "N_UC": n_uc,
+        "N_Control": n_ctrl,
+        "Age_UC": age_uc,
+        "Age_Control": age_ctrl,
+        "p_Age": p_age,
+        "Sex_UC": sex_uc,
+        "Sex_Control": sex_ctrl,
+        "p_Sex": p_sex,
+        "Ethnicity_UC": eth_uc,
+        "Ethnicity_Control": eth_ctrl,
+        "p_Ethnicity": p_eth,
+        "Other_IBD_UC": other_ibd_uc,
+        "Other_IBD_Control": other_ibd_ctrl,
+        "p_Other_IBD": p_other_ibd,
+        "Crohns_UC": cd_uc,
+        "Crohns_Control": cd_ctrl,
+        "p_Crohns": p_cd,
+        "HTN_UC": htn_uc,
+        "HTN_Control": htn_ctrl,
+        "p_HTN": p_htn,
+        "DM_UC": dm_uc,
+        "DM_Control": dm_ctrl,
+        "p_DM": p_dm
+    }
+    return summary
+
+def print_summary_table_detailed(summary):
+    # Build a detailed table with separate rows for each category.
+    rows = []
+    # Age row
+    rows.append(["Age, y", "Overall", summary["Age_UC"], summary["Age_Control"], f"p = {summary['p_Age']:.4f}"])
+    
+    # Sex rows
+    for cat in ['Male', 'Female', 'Unknown']:
+        uc_val = f"{summary['Sex_UC'][cat][0]} ({summary['Sex_UC'][cat][1]:.1f}%)"
+        ctrl_val = f"{summary['Sex_Control'][cat][0]} ({summary['Sex_Control'][cat][1]:.1f}%)"
+        rows.append(["Sex, n (%)", cat, uc_val, ctrl_val, f"p = {summary['p_Sex']:.4f}"])
+    
+    # Ethnicity rows
+    for cat in ['Asian or Asian British', 'Black or Black British', 'Mixed', 'Other Ethnic Groups', 'White', 'Unknown']:
+        uc_val = f"{summary['Ethnicity_UC'][cat][0]} ({summary['Ethnicity_UC'][cat][1]:.1f}%)"
+        ctrl_val = f"{summary['Ethnicity_Control'][cat][0]} ({summary['Ethnicity_Control'][cat][1]:.1f}%)"
+        rows.append(["Ethnicity, n (%)", cat, uc_val, ctrl_val, f"p = {summary['p_Ethnicity']:.4f}"])
+    
+    # Binary conditions rows
+    rows.append(["Other IBD, n (%)", "Overall", summary["Other_IBD_UC"], summary["Other_IBD_Control"], f"p = {summary['p_Other_IBD']:.4f}"])
+    rows.append(["Crohns Disease, n (%)", "Overall", summary["Crohns_UC"], summary["Crohns_Control"], f"p = {summary['p_Crohns']:.4f}"])
+    rows.append(["Hypertension, n (%)", "Overall", summary["HTN_UC"], summary["HTN_Control"], f"p = {summary['p_HTN']:.4f}"])
+    rows.append(["Diabetes Mellitus, n (%)", "Overall", summary["DM_UC"], summary["DM_Control"], f"p = {summary['p_DM']:.4f}"])
+    
+    headers = ["Characteristic", "Category", 
+               f"UC (n={summary['N_UC']})", f"Control (n={summary['N_Control']})",
+               "p-value"]
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+# --- Summarize Adjusted Data and Print Detailed Table ---
+summary_adj = summarize_dataset(df_adj, dataset_label="Adjusted Analysis")
+print_summary_table_detailed(summary_adj)
+
+
+# %%
+# Define the fixed order of ethnicity categories
+eth_labels = [
+    'Asian or Asian British',
+    'Black or Black British',
+    'Mixed',
+    'Other Ethnic Groups',
+    'White',
+    'Unknown'
+]
+
+# Split the adjusted data into UC and Control groups
+df_uc_adj = df_adj[df_adj['UC_bin'] == 1]
+df_control_adj = df_adj[df_adj['UC_bin'] == 0]
+
+# Get ethnicity counts and reindex to ensure the same order; fill missing with 0
+uc_eth_counts_adj = df_uc_adj['ethnicity_group'].value_counts().reindex(eth_labels, fill_value=0)
+control_eth_counts_adj = df_control_adj['ethnicity_group'].value_counts().reindex(eth_labels, fill_value=0)
+
+# Convert counts to percentages
+uc_eth_percent_adj = 100 * uc_eth_counts_adj / len(df_uc_adj)
+control_eth_percent_adj = 100 * control_eth_counts_adj / len(df_control_adj)
+
+# Create a DataFrame for plotting
+eth_df_adj = pd.DataFrame({
+    "Ethnicity": eth_labels,
+    "UC": uc_eth_percent_adj.values,
+    "Control": control_eth_percent_adj.values
+})
+
+# Set positions for the grouped bars
+x = np.arange(len(eth_labels))
+width = 0.35  # width of each bar
+
+# Plot grouped bar chart
+plt.figure(figsize=(8,6))
+plt.bar(x - width/2, eth_df_adj["UC"], width, label="UC", color="red", alpha=0.7)
+plt.bar(x + width/2, eth_df_adj["Control"], width, label="Control", color="green", alpha=0.7)
+
+# Add labels, title, and custom x-ticks
+plt.xlabel("Ethnicity", fontsize=14, fontweight="bold")
+plt.ylabel("Percentage (%)", fontsize=14, fontweight="bold")
+plt.title("Ethnicity Distribution: Adjusted Analysis", fontsize=16, fontweight="bold", pad=20)
+plt.xticks(x, eth_labels, rotation=45, fontsize=12)
+plt.yticks(fontsize=12)
+plt.legend()
+plt.tight_layout()
+plt.show()
