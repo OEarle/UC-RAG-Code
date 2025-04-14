@@ -1,0 +1,603 @@
+# %%
+###############################################################################
+# Cell 1 - Imports and Setup
+###############################################################################
+
+import numpy as np
+import pandas as pd
+import scipy.stats as stats
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import levene, ttest_ind, normaltest, kruskal, shapiro 
+from datetime import datetime
+
+
+# Seaborn style
+sns.set_style("whitegrid")
+sns.set_context("talk", font_scale=1.2)
+
+# %%
+###############################################################################
+# Cell 2 - DATA FILTERING 1
+###############################################################################
+
+def remove_nonessential_data(df):
+    try:
+        initial_count = len(df)
+        # Keep rows where fixation is 'Macular'
+        df = df[df['fixation'] == 'Macular']
+        removed_fixation = initial_count - len(df)
+        print(f"Removed {removed_fixation} scans due to non-Macular fixation.")
+        
+        # Remove columns 'dimensionZ' and 'resolutionZ' if they exist
+        if 'dimensionZ' in df.columns:
+            df = df.drop(columns=['dimensionZ'])
+        if 'resolutionZ' in df.columns:
+            df = df.drop(columns=['resolutionZ'])
+        
+        # Remove rows where pred_age is 'Poor quality'
+        before_pred = len(df)
+        df = df[df['pred_age'] != 'Poor quality']
+        removed_pred = before_pred - len(df)
+        print(f"Removed {removed_pred} scans due to 'Poor quality' pred_age.")
+        
+        return df
+
+    except FileNotFoundError:
+        print("Error: The file was not found. Please check the file path and try again.")
+    except pd.errors.EmptyDataError:
+        print("Error: The CSV file is empty. Please check the file contents.")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+
+
+def calculate_age(df):
+    def calculate_age_from_dates(dob, scan_date):
+        dob = datetime.strptime(dob, '%Y-%m')
+        try:
+            scan_d = datetime.strptime(scan_date, '%Y-%m-%d')
+        except ValueError:
+            scan_d = datetime.strptime(scan_date, '%d/%m/%Y')
+        age = scan_d.year - dob.year - ((scan_d.month, scan_d.day) < (dob.month, 1))
+        return age
+
+    df['age_at_scan'] = df.apply(lambda row: calculate_age_from_dates(row['dob_month'], row['date']), axis=1)
+    return df
+
+
+def restrict_by_age(df):
+    before_age = len(df)
+    # Restrict age between 40 and 75
+    df = df[(df['age_at_scan'] >= 40) & (df['age_at_scan'] <= 75)]
+    removed_age = before_age - len(df)
+    print(f"Removed {removed_age} scans due to age restriction (not between 40 and 75).")
+    return df
+
+
+def calculate_retinal_age_gap(df):
+    # Ensure 'pred_age' is numeric
+    df['pred_age'] = pd.to_numeric(df['pred_age'], errors='coerce')
+    # Calculate the difference between age_at_scan and pred_age
+    df['retinal_age_gap'] = df['age_at_scan'] - df['pred_age']
+    return df
+
+
+def binary_condition_labels(df):
+    try:
+        condition_columns = ['CD', 'UC', 'other_IBD', 'htn', 'dm']
+        for col in condition_columns:
+            if col in df.columns:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    # Any nonzero value becomes 1
+                    df[col] = df[col].apply(lambda x: 1 if x != 0 else 0)
+                else:
+                    df[col] = df[col].notna().astype(int)
+        return df 
+    except Exception as e:
+        print(f"An error has occurred in binary_condition_labels: {e}")
+        return df 
+
+
+def label_controls_and_UCpatients(df):
+    before_filter = len(df)
+    
+    # Count and report scans with CD or other_IBD
+    cd_scans = df[df['CD'] == 1]
+    other_ibd_scans = df[df['other_IBD'] == 1]
+    
+    print(f"Removed {cd_scans.shape[0]} scans due to presence of CD.")
+    print(f"Removed {other_ibd_scans.shape[0]} scans due to presence of other_IBD.")
+    
+    # Remove rows that have CD or other_IBD
+    df = df[(df['CD'] == 0) & (df['other_IBD'] == 0)].copy()
+    after_filter = len(df)
+    print(f"Removed a total of {before_filter - after_filter} scans during the control vs UC stage.")
+    
+    # Label remaining scans: if UC == 1 then 'UC_patient', else 'Control'
+    df.loc[:, 'patient_label'] = np.where(df['UC'] == 1, 'UC_patient', 'Control')
+    
+    return df
+
+def take_instance_oct(df, instance_mode='first'):
+    
+    before_dup = len(df)
+    
+    # Sort by patient_id, laterality, date (ascending)
+    df = df.sort_values(by=['patient_id', 'laterality', 'date'])
+    # Drop duplicates, keeping either the first or the last occurrence
+    df = df.drop_duplicates(subset=['patient_id', 'laterality'], keep=instance_mode)
+    
+    removed_dups = before_dup - len(df)
+    mode_text = "earliest" if instance_mode=='first' else "latest"
+    print(f"Removed {removed_dups} duplicate scans by taking the {mode_text} instance for each laterality.")
+    
+    return df
+
+def save_file(df, output_file):
+    df.to_csv(output_file, index=False)
+
+# Main pipeline
+if __name__ == "__main__":
+    input_file = 'Raw_Data.csv' 
+    output_file = 'Filtered_Data_1.csv' 
+    
+    # Switch between 'first' and 'last' here:
+    instance_mode = 'first'  # <----- CHANGE HERE
+
+    try:
+        df = pd.read_csv(input_file)
+        initial_total = len(df)
+        print(f"Initial total scans: {initial_total}")
+
+        # Apply data filtering steps
+        df = remove_nonessential_data(df)
+        df = calculate_age(df)
+        df = restrict_by_age(df)
+        df = calculate_retinal_age_gap(df)
+        df = binary_condition_labels(df)
+        df = label_controls_and_UCpatients(df)
+        
+        # Keep earliest or latest scan per patient-laterality
+        df = take_instance_oct(df, instance_mode=instance_mode)
+
+        final_total = len(df)
+        print(f"Final total scans after filtering: {final_total}")
+        print("Done.")
+
+        # Save the resulting file
+        save_file(df, output_file)
+        print(f"Filtered data saved to {output_file}")
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+# %%
+###############################################################################
+# Cell 3 - Importing Data / Create UC_bin Column and Assign 0:1 Classifcation 
+###############################################################################
+
+df_encoded = pd.read_csv("S:/IoO_Keane_Research/People/Oscar/Dissertation Analysis/Filtered_Data_1.csv")
+
+# If 'UC_bin' does not exist, create it from 'patient_label' if available
+if 'UC_bin' not in df_encoded.columns:
+    if 'patient_label' in df_encoded.columns:
+        df_encoded['UC_bin'] = (df_encoded['patient_label'] == 'UC_patient').astype(int)
+    else:
+        raise KeyError("Neither 'UC_bin' nor 'patient_label' found in the DataFrame.")
+        
+# Filter for UC (1) vs. Control (0)
+df_uc_control_clean = df_encoded[df_encoded['UC_bin'].isin([0, 1])].copy()
+df_sample = df_uc_control_clean.sample(n=1000, random_state=42)
+
+# %%
+###############################################################################
+# Cell 4 - OLS Unadjusted Regression 
+###############################################################################
+
+# Run the OLS regression model
+model = smf.ols("retinal_age_gap ~ UC_bin", data=df_uc_control_clean).fit()
+print(model.summary())
+
+# Extract key values from the model
+intercept = model.params['Intercept']
+uc_coef = model.params['UC_bin']
+p_value = model.pvalues['UC_bin']
+
+# %%
+###############################################################################
+# Cell 5 - OLS Model Interpretation 
+###############################################################################
+
+print("\nModel Interpretation:")
+print(f"- The intercept is {intercept:.2f}. This represents the average retinal age gap for the Control group (UC_bin=0).")
+print(f"- The coefficient for UC_bin is {uc_coef:.2f} (p-value = {p_value:.3f}).")
+if p_value < 0.05:
+    print("  This suggests that the difference in retinal age gap between UC patients and Controls is statistically significant.")
+else:
+    print("  This suggests that the difference in retinal age gap between UC patients and Controls is not statistically significant.")
+print(f"- In other words, UC patients are estimated to have a retinal age gap that is {uc_coef:+.2f} units different from Controls in this unadjusted analysis.")
+
+
+# %%
+###############################################################################
+# Cell 6 - Normality Test on Residuals (Difference Between Observed and Predicted Values) 
+###############################################################################
+
+# Normality Test (D'Agostino and Pearson's Test) on residuals
+residuals = model.resid
+stat, p_value_normality = normaltest(residuals)
+print(f"\nNormality Test Results (D'Agostino and Pearson's test):")
+print(f"Test statistic: {stat:.3f}, p-value: {p_value_normality:.3f}")
+if p_value_normality < 0.05:
+    print("  The residuals are not normally distributed (reject H0).")
+else:
+    print("  The residuals appear to be normally distributed (fail to reject H0).")
+
+# %%
+###############################################################################
+# Cell 7 - Homogenity Test of Variance (Levene's Test)
+###############################################################################
+
+# Levene's Test is used to see if the variance of RAG is similar between the two groups 
+group_0 = df_uc_control_clean[df_uc_control_clean['UC_bin'] == 0]['retinal_age_gap']
+group_1 = df_uc_control_clean[df_uc_control_clean['UC_bin'] == 1]['retinal_age_gap']
+stat, p_value_variance = levene(group_0, group_1)
+print(f"\nLevene's Test for Homogeneity of Variance:")
+print(f"Test statistic: {stat:.3f}, p-value: {p_value_variance:.3f}")
+if p_value_variance < 0.05:
+    print("  The variances between the groups are significantly different (reject H0).")
+else:
+    print("  The variances between the groups are homogeneous (fail to reject H0).")
+
+
+# %%
+###############################################################################
+# Cell 8 - T-Test - Conditional on Levene's test result (Standard T-Test or Welch's T-Test)
+###############################################################################
+
+if p_value_variance < 0.05:
+    print("Using Welch's t-test due to unequal variances.")
+    t_stat, p_value_ttest = ttest_ind(group_0, group_1, equal_var=False)
+else:
+    print("Using standard t-test (equal variances assumed).")
+    t_stat, p_value_ttest = ttest_ind(group_0, group_1, equal_var=True)
+
+print(f"\nT-Test Results (UC vs Control):")
+print(f"T-statistic: {t_stat:.3f}, p-value: {p_value_ttest:.3f}")
+if p_value_ttest < 0.05:
+    print("  The difference in means between UC and Control groups is statistically significant (reject H0).")
+else:
+    print("  The difference in means between UC and Control groups is not statistically significant (fail to reject H0).")
+
+# %%
+###############################################################################
+# Cell 9 - Violin Plot - Display Overall Distribution of RAG for each group 0:1
+###############################################################################
+
+# Define colors
+control_colour = 'green'
+uc_colour = 'purple'
+datapoint_colour = 'black'
+datapoint_alpha = 0.3
+
+plt.figure(figsize=(10, 6))
+
+sns.violinplot(
+    x='UC_bin',
+    y='retinal_age_gap',
+    data=df_uc_control_clean,
+    inner=None,
+    width=0.8,
+    palette=[control_colour, uc_colour]
+)
+
+sns.boxplot(
+    x='UC_bin',
+    y='retinal_age_gap',
+    data=df_uc_control_clean,
+    width=0.2,
+    color='white',
+    boxprops={'zorder': 2},
+    showfliers=False
+)
+
+sns.stripplot(
+    x='UC_bin',
+    y='retinal_age_gap',
+    data=df_sample,
+    color=datapoint_colour,
+    alpha=datapoint_alpha,
+    size=3,
+    jitter=0.15
+)
+
+plt.xticks([0, 1], ['Control', 'UC Patient'], fontsize=12)
+plt.xlabel("UC Status", fontsize=14, fontweight="bold")
+plt.ylabel("Retinal Age Gap (years)", fontsize=14, fontweight="bold")
+plt.title("Distribution of Retinal Age Gap by UC Status",
+    fontweight="bold", fontsize=16, pad=20
+)
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 10 - Unadjusted Regression Plot 
+###############################################################################
+
+# Extract Regression Parameters
+slope = model.params['UC_bin'] 
+intercept = model.params['Intercept']
+equation_text = f"y = {intercept:.2f} + {slope:.2f}(UC_bin)"
+
+# Setup Figure 
+plt.figure(figsize=(10, 6))
+sns.stripplot(
+    x='UC_bin',
+    y='retinal_age_gap',
+    data=df_sample,
+    color='black',
+    alpha=0.3,
+    size=4,
+    jitter=0.15
+)
+
+# Horizontal lines
+plt.hlines(
+    y=intercept,
+    xmin=-0.2, xmax=0.2,
+    colors='green', linewidth=3,
+    label='Predicted Mean (Control)'
+)
+plt.hlines(
+    y=intercept + slope,
+    xmin=0.8, xmax=1.2,
+    colors='purple', linewidth=3,
+    label='Predicted Mean (UC)'
+)
+
+plt.xticks([0, 1], ['Control', 'UC Patient'], fontsize=12)
+plt.xlabel("UC Status", fontsize=14, fontweight="bold")
+plt.ylabel("Retinal Age Gap (years)", fontsize=14, fontweight="bold")
+plt.title(
+    "Unadjusted Regression of Retinal Age Gap on UC Status",
+    fontweight="bold", fontsize=25, pad=20, loc='center'
+)
+
+max_y = df_uc_control_clean['retinal_age_gap'].max()
+plt.text(
+    0.5, max_y * 0.95,
+    equation_text,
+    ha='center', color='red',
+    bbox=dict(facecolor='white', alpha=0.6, edgecolor='red'),
+    fontsize=14, fontweight="bold"
+)
+
+plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+plt.tight_layout()
+plt.show()
+
+
+# %%
+###############################################################################
+# Cell 11 - Residuals vs Fitted Plot - Help to Identify Patterns of Non-linearity or Heteroscedscity 
+###############################################################################
+
+plt.figure(figsize=(10, 6))
+sns.residplot(
+    x=model.fittedvalues,
+    y=model.resid,
+    lowess=True,
+    scatter_kws={'alpha': 0.5},
+    line_kws={'color': 'blue'}
+)
+plt.axhline(0, color='red', linestyle='--')
+plt.title("Residuals vs Fitted Values",
+    fontweight="bold", fontsize=18, pad=20
+)
+plt.xlabel("Fitted Values", fontsize=14, fontweight="bold")
+plt.ylabel("Residuals", fontsize=14, fontweight="bold")
+plt.tight_layout()
+plt.show()
+
+
+# %%
+###############################################################################
+# Cell 12 - Qunitlie-Quintile (Q-Q) Plot - Assess wether the residuals follow a normal 
+# distribtuion by comparign their quantiles to those of a standard normal distribution 
+###############################################################################
+
+fig = plt.figure(figsize=(10, 6))
+ax = fig.add_subplot(111)
+sm.qqplot(model.resid_pearson, line='45', fit=True, ax=ax)
+
+ax.set_title("Q-Q Plot of Standardised Residuals",
+    fontweight="bold", fontsize=20, pad=20
+)
+ax.set_xlabel("Theoretical Quantiles", fontsize=14, fontweight="bold")
+ax.set_ylabel("Sample Quantiles", fontsize=14, fontweight="bold")
+ax.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# %%
+###############################################################################
+# Cell 13 - Bar Plot for UC RAG vs Controls
+###############################################################################
+
+df_uc_control_clean['Group'] = df_uc_control_clean['UC_bin'].map({0: "Control", 1: "UC Patient"})
+
+plt.figure(figsize=(8,6))
+
+# We specify hue='Group' and dodge=False so we only get one bar per group, and we pass ci=95 to get 95% confidence intervals.
+sns.barplot(
+    x='Group', 
+    y='retinal_age_gap',
+    hue='Group', 
+    data=df_uc_control_clean,
+    dodge=False, 
+    palette=['green','purple'],
+    ci=95,             # 95% confidence interval
+    capsize=0.2,       # Error bar cap size
+    errwidth=2,        # Error bar line width
+    estimator=np.mean, # We want the mean
+    order=['Control','UC Patient']
+)
+
+# Draw a reference line at y=0
+plt.axhline(0, color='black', linestyle='--', alpha=0.7)
+
+plt.title(
+    "Mean Retinal Age Gap by UC Status (95% CI)",
+    fontweight="bold", fontsize=16, pad=20
+)
+plt.xlabel("")  # No label needed, since 'Group' is already on the x-axis
+plt.ylabel("Retinal Age Gap (years)", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+
+# Remove the redundant legend (since hue just repeats the group)
+plt.legend([], [], frameon=False)
+
+plt.tight_layout()
+plt.show()
+
+print("Bar Plot: Shows the mean retinal age gap for Control vs. UC Patient groups with 95% confidence intervals.")
+
+# %%
+###############################################################################
+# Cell 14 - Kernel Density Plot of RAG - Displays the smoothed RAG for each group 
+###############################################################################
+
+plt.figure(figsize=(8,6))
+
+sns.kdeplot(
+    data=df_uc_control_clean[df_uc_control_clean['UC_bin'] == 0]['retinal_age_gap'],
+    shade=True, color='green', label='Control'
+)
+sns.kdeplot(
+    data=df_uc_control_clean[df_uc_control_clean['UC_bin'] == 1]['retinal_age_gap'],
+    shade=True, color='purple', label='UC Patient'
+)
+
+plt.title(
+    "Kernel Density of Retinal Age Gap by UC Status",
+    fontweight="bold", fontsize=16, pad=20
+)
+plt.xlabel("Retinal Age Gap (years)", fontsize=14, fontweight="bold")
+plt.ylabel("Density", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+print("Kernel Density Plot: Shows the smoothed distribution of retinal age gap for each group.")
+
+
+# %%
+###############################################################################
+# Cell 15 - Histogram of Model Residuals 
+###############################################################################
+
+plt.figure(figsize=(8,6))
+sns.histplot(model.resid, kde=True, color='orange', bins=30)
+
+plt.title(
+    "Histogram of Model Residuals",
+    fontweight="bold", fontsize=16, pad=20
+)
+plt.xlabel("Residuals", fontsize=14, fontweight="bold")
+plt.ylabel("Frequency", fontsize=14, fontweight="bold")
+plt.xticks(fontsize=12)
+plt.yticks(fontsize=12)
+plt.tight_layout()
+plt.show()
+
+print("Histogram of Residuals: Provides a visual check for skewness or outliers in the model's residuals.")
+
+# %%
+# Additional Unadjusted Statistical Tests
+
+###############################################################################
+# Cell 16 - Shapiro-Wilk Test for Normality 
+###############################################################################
+
+stat, p_value_shapiro = shapiro(model.resid)
+print(f"\nShapiro-Wilk Test for Normality:")
+print(f"Test statistic: {stat:.3f}, p-value: {p_value_shapiro:.3f}")
+if p_value_shapiro < 0.05:
+    print("  The residuals are not normally distributed (reject H0). This indicates that the assumption of normality is violated.")
+else:
+    print("  The residuals appear to be normally distributed (fail to reject H0). This suggests that the residuals follow a normal distribution.")
+
+# %%
+###############################################################################
+# Cell 17 - Kruskal-Wallis Test
+###############################################################################
+
+stat_kruskal, p_value_kruskal = kruskal(group_0, group_1)
+print(f"\nKruskal-Wallis Test for Non-Parametric Comparison:")
+print(f"Test statistic: {stat_kruskal:.3f}, p-value: {p_value_kruskal:.3f}")
+if p_value_kruskal < 0.05:
+    print("  The difference in distributions between UC and Control is statistically significant (reject H0). This suggests that UC patients and Controls have different distributions of retinal age gap.")
+else:
+    print("  The difference in distributions between UC and Control is not statistically significant (fail to reject H0). This suggests no strong evidence for a distributional difference between the two groups.")
+
+# %%
+###############################################################################
+# Cell 18 - Cohen's D - Effect Size
+###############################################################################
+
+from numpy import std
+
+cohen_d = (np.mean(group_1) - np.mean(group_0)) / np.sqrt((std(group_0) ** 2 + std(group_1) ** 2) / 2)
+print(f"\nCohen's d (Effect Size): {cohen_d:.3f}")
+if cohen_d > 0.8:
+    print("  This is considered a large effect size. This suggests that the difference between UC patients and Controls is substantial.")
+elif cohen_d > 0.5:
+    print("  This is considered a medium effect size. This suggests a moderate difference between UC patients and Controls.")
+else:
+    print("  This is considered a small effect size. This suggests that the difference between UC patients and Controls is modest.")
+
+# %%
+###############################################################################
+# Cell 19 - Robust Regression (To Account For Outliers)
+###############################################################################
+
+from statsmodels.robust.robust_linear_model import RLM
+import statsmodels.api as sm
+
+# Prepare independent variable and dependent variable
+X = sm.add_constant(df_uc_control_clean['UC_bin'])
+y = df_uc_control_clean['retinal_age_gap']
+
+# Fit the robust regression model
+robust_model = RLM(y, X).fit()
+print(f"\nRobust Regression Results (to account for outliers):")
+print(robust_model.summary())
+print("Robust regression adjusts for outliers and provides a more accurate estimate of the relationship between UC and retinal age gap.")
+
+# Interaction Term Analysis (if suspecting interaction between variables)
+formula_interaction = "retinal_age_gap ~ UC_bin * age_at_scan"  # Adding interaction term with 'age_at_scan'
+model_interaction = smf.ols(formula_interaction, data=df_uc_control_clean).fit()
+print(f"\nInteraction Term Model Results (UC_bin * age_at_scan):")
+print(model_interaction.summary())
+print("This model tests whether the relationship between UC status and retinal age gap changes depending on the age at scan.")
+
+# 6. Post-Hoc Pairwise Comparisons (if using Kruskal-Wallis test)
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+
+# Post-hoc analysis if Kruskal-Wallis is significant
+if p_value_kruskal < 0.05:
+    post_hoc = pairwise_tukeyhsd(df_uc_control_clean['retinal_age_gap'], df_uc_control_clean['UC_bin'])
+    print(f"\nPost-hoc Pairwise Comparisons (Kruskal-Wallis significant):")
+    print(post_hoc)
+    print("Post-hoc tests help identify which specific groups (UC vs Control) differ from each other.")
+else:
+    print("\nPost-hoc analysis not conducted, as Kruskal-Wallis was not significant. No significant difference in distributions between groups was found.")
+
+
