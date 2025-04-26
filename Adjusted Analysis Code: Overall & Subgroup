@@ -154,7 +154,7 @@ try:
     df = restrict_by_age(df)
     
     # Choose whether to keep first or last instance of scans per patient laterality
-    instance_mode = 'first'   # <----- CHANGE HERE
+    instance_mode = 'last'   # <----- CHANGE HERE
     df = take_instance_oct(df, instance_mode=instance_mode)
     
     df = calculate_retinal_age_gap(df)
@@ -264,6 +264,33 @@ if len(bool_cols) > 0:
     df_encoded[bool_cols] = df_encoded[bool_cols].astype(int)
     print("\nConverted boolean columns to integers:")
     print(bool_cols.tolist())
+
+# %%
+#Corrected Plot for Cell 6 (old one retained below just for my personal reference)
+
+plt.figure(figsize=(10, 6))
+palette = {0: 'steelblue', 1: 'indianred'}
+labels  = {0: 'Control', 1: 'UC Patient'}
+
+for status in [0, 1]:
+    subset = df_encoded.loc[df_encoded['UC_bin'] == status, 'retinal_age_gap']
+    sns.kdeplot(
+        subset,
+        bw_adjust=1,        
+        cut=0,              
+        fill=True,          
+        alpha=0.3,          
+        linewidth=2,
+        color=palette[status],
+        label=labels[status]  
+    )
+
+plt.title('Adjusted RAG Density by UC Status', fontsize=16, fontweight='bold')
+plt.xlabel('Retinal Age Gap (years)', fontsize=14)
+plt.ylabel('Density', fontsize=14)
+plt.legend(title='Group')
+plt.tight_layout()
+plt.show()
 
 # %%
 # QUICK EDA #
@@ -879,8 +906,6 @@ else:
 ###############################################################################
 # New Cell – Enhanced Separate Box Plots Using IMD Quintiles (Updated)
 ###############################################################################
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 # --- Step 1: (Already done in Cell 4) df_clean now contains 'imd_quintile'
 print("IMD Quintile unique values:", df_clean['imd_quintile'].unique())
@@ -964,6 +989,3 @@ ax3.tick_params(axis='y', labelsize=tick_label_size)
 leg3 = ax3.legend(title='UC Status', bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0, prop={'size': legend_text_size})
 plt.tight_layout()
 plt.show()
-
-
-
